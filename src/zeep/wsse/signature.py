@@ -8,6 +8,8 @@ admittedly painful, will likely assist in understanding the code in this
 module.
 
 """
+from datetime import datetime, timedelta
+
 from lxml import etree
 from lxml.etree import QName
 
@@ -52,6 +54,8 @@ class MemorySignature(object):
         password=None,
         signature_method=None,
         digest_method=None,
+        verify_response=True,
+        force_timestamp=False
     ):
         check_xmlsec_import()
 
@@ -60,11 +64,13 @@ class MemorySignature(object):
         self.password = password
         self.digest_method = digest_method
         self.signature_method = signature_method
+        self.verify_response = verify_response
+        self.force_timestamp = force_timestamp
 
     def apply(self, envelope, headers):
         key = _make_sign_key(self.key_data, self.cert_data, self.password)
         _sign_envelope_with_key(
-            envelope, key, self.signature_method, self.digest_method
+            envelope, key, self.signature_method, self.digest_method, self.force_timestamp
         )
         return envelope, headers
 
@@ -84,6 +90,8 @@ class Signature(MemorySignature):
         password=None,
         signature_method=None,
         digest_method=None,
+        verify_response=True,
+        force_timestamp=False
     ):
         super(Signature, self).__init__(
             _read_file(key_file),
@@ -91,6 +99,8 @@ class Signature(MemorySignature):
             password,
             signature_method,
             digest_method,
+            verify_response,
+            force_timestamp
         )
 
 
@@ -102,7 +112,7 @@ class BinarySignature(Signature):
     def apply(self, envelope, headers):
         key = _make_sign_key(self.key_data, self.cert_data, self.password)
         _sign_envelope_with_key_binary(
-            envelope, key, self.signature_method, self.digest_method
+            envelope, key, self.signature_method, self.digest_method, self.force_timestamp
         )
         return envelope, headers
 
@@ -213,10 +223,10 @@ def sign_envelope(
     """
     # Load the signing key and certificate.
     key = _make_sign_key(_read_file(keyfile), _read_file(certfile), password)
-    return _sign_envelope_with_key(envelope, key, signature_method, digest_method)
+    return _sign_envelope_with_key(envelope, key, signature_method, digest_method, force_timestamp)
 
 
-def _signature_prepare(envelope, key, signature_method, digest_method):
+def _signature_prepare(envelope, key, signature_method, digest_method, force_timestamp):
     """Prepare envelope and sign."""
     soap_env = detect_soap_env(envelope)
 
@@ -242,8 +252,19 @@ def _signature_prepare(envelope, key, signature_method, digest_method):
     ctx = xmlsec.SignatureContext()
     ctx.key = key
     _sign_node(ctx, signature, envelope.find(QName(soap_env, "Body")), digest_method)
+
     timestamp = security.find(QName(ns.WSU, "Timestamp"))
-    if timestamp != None:
+    if force_timestamp and not timestamp:
+        timestamp = etree.Element(QName(ns.WSU, 'Timestamp'))
+        created = etree.Element(QName(ns.WSU, 'Created'))
+        created.text = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+        expired = etree.Element(QName(ns.WSU, 'Expired'))
+        expired.text = (datetime.utcnow() + timedelta(minutes=5)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        timestamp.append(created)
+        timestamp.append(expired)
+        security.append(timestamp)
+
+    if timestamp is not None:
         _sign_node(ctx, signature, timestamp)
     ctx.sign(signature)
 
@@ -255,16 +276,16 @@ def _signature_prepare(envelope, key, signature_method, digest_method):
     return security, sec_token_ref, x509_data
 
 
-def _sign_envelope_with_key(envelope, key, signature_method, digest_method):
+def _sign_envelope_with_key(envelope, key, signature_method, digest_method, force_timestamp):
     _, sec_token_ref, x509_data = _signature_prepare(
-        envelope, key, signature_method, digest_method
+        envelope, key, signature_method, digest_method, force_timestamp
     )
     sec_token_ref.append(x509_data)
 
 
-def _sign_envelope_with_key_binary(envelope, key, signature_method, digest_method):
+def _sign_envelope_with_key_binary(envelope, key, signature_method, digest_method, force_timestamp):
     security, sec_token_ref, x509_data = _signature_prepare(
-        envelope, key, signature_method, digest_method
+        envelope, key, signature_method, digest_method, force_timestamp
     )
     ref = etree.SubElement(
         sec_token_ref,
